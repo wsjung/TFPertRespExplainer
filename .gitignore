@@ -2,6 +2,8 @@ __pycache__
 
 RESOURCES/*
 OUTPUT/*
+JOBS/*
+LOG/*
 
 !RESOURCES/.gitignore
 !OUTPUT/.gitignore
@@ -9,3 +11,4 @@ OUTPUT/*
 .*DS_Store
 .ipynb_checkpoints/
 download.ipynb
+tmp/

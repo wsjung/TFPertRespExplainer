@@ -6,7 +6,7 @@ from copy import deepcopy
 import numpy as np
 import pandas as pd
 import multiprocess as mp
-from sklearn.model_selection import StratifiedKFold, KFold
+from sklearn.model_selection import KFold
 from sklearn.metrics import average_precision_score, roc_auc_score, r2_score
 import xgboost as xgb
 import shap
@@ -24,38 +24,52 @@ RAND_NUM = int(config['DEFAULT']['rand_num'])
 np.random.seed(RAND_NUM)
 MAX_RECURSION = int(config['DEFAULT']['max_recursion'])
 sys.setrecursionlimit(MAX_RECURSION)
-BG_GENE_NUM = 500
+MAX_CV_FOLDS = int(config['DEFAULT']['max_cv_folds'])
+BG_GENE_NUM = 1000
 
 
 class TFPRExplainer:
-    def __init__(self, feat_mtx, features, label_df):
-        self.X = feat_mtx
-        self.y = label_df
+    def __init__(self, tf_feat_mtx_dict, nontf_feat_mtx, features, label_df_dict):
+        self.tfs = np.sort(list(label_df_dict.keys()))
+        self.genes = label_df_dict[self.tfs[0]].index.values
         self.feats = features
-        self.genes = label_df.index.values
-        self.k_folds = 10
+        self.n_tfs = len(self.tfs)
+        self.n_genes = len(self.genes)
+        self.k_folds = min(MAX_CV_FOLDS, len(self.tfs))
+        
+        self.tg_pairs = [tf + ':' + gene for tf in self.tfs for gene in self.genes]
+        self.tf_X = np.vstack([tf_feat_mtx_dict[tf] for tf in self.tfs])
+        self.nontf_X = nontf_feat_mtx
+        self.y = np.hstack([label_df_dict[tf].values for tf in self.tfs])
 
-    def cross_validate(self, is_regressor=False):
+    def cross_validate(self):
         """Cross valdiate a classifier or regressor using multiprocessing.
         """
         with mp.Pool(processes=self.k_folds) as pool:
             mp_results = {}
+            tf_pseudo_X = np.empty((len(self.tfs), 0))
+            
+            kfolds = KFold(n_splits=self.k_folds, shuffle=True, random_state=RAND_NUM)
 
-            if is_regressor:
-                kfolds = KFold(
-                    n_splits=self.k_folds, shuffle=True, random_state=RAND_NUM)
-            else:
-                kfolds = StratifiedKFold(
-                    n_splits=self.k_folds, shuffle=True, random_state=RAND_NUM)
-
-            for k, (tr_idx, te_idx) in enumerate(kfolds.split(self.X, self.y)):
+            for k, (tf_tr_idx, tf_te_idx) in enumerate(kfolds.split(tf_pseudo_X)):
+                tr_idx = expand_tf2gene_index(tf_tr_idx, self.n_genes)
+                te_idx = expand_tf2gene_index(tf_te_idx, self.n_genes)
+                
                 y_tr, y_te = self.y[tr_idx], self.y[te_idx]
-                X_tr, X_te = self.X[tr_idx], self.X[te_idx]
-                X_tr, X_te = standardize_feat_mtx(X_tr, X_te, 'zscore')
+                tf_X_tr, tf_X_te = self.tf_X[tr_idx], self.tf_X[te_idx]
+
+                tf_X_tr, tf_X_te = standardize_feat_mtx(tf_X_tr, tf_X_te, 'zscore')
+                nontf_X, _ = standardize_feat_mtx(self.nontf_X, None, 'zscore')
 
                 mp_results[k] = pool.apply_async(
                     train_and_predict,
-                    args=(k, (X_tr, y_tr), (X_te, y_te), is_regressor,))
+                    args=(
+                        k, 
+                        (tf_X_tr, y_tr), 
+                        (tf_X_te, y_te),
+                        nontf_X, 
+                        (self.tfs[tf_tr_idx], self.tfs[tf_te_idx]), 
+                        self.genes))
 
             self.cv_results = compile_mp_results(mp_results)
 
@@ -67,14 +81,23 @@ class TFPRExplainer:
             mp_results = {}
 
             for k, y_te in enumerate(self.cv_results['preds']):
-                te_genes = y_te['gene'].values
-                te_idx = [np.where(self.genes == g)[0][0] for g in te_genes]
+                n_tfs_te = len(y_te['tf'].unique())
+                n_tfs_tr = self.n_tfs - n_tfs_te
+
+                y_te['tf:gene'] = y_te['tf'] + ':' + y_te['gene']
+                te_tg_pairs = y_te['tf:gene'].values
+                te_idx = [self.tg_pairs.index(tg_pair) for tg_pair in te_tg_pairs]
                 
-                tr_idx = sorted(set(range(len(self.genes))) - set(te_idx))
+                tr_idx = sorted(set(range(len(self.tg_pairs))) - set(te_idx))
                 logger.info('Explaining {} genes in fold {}'.format(len(te_idx), k))
 
-                X_tr, X_te = self.X[tr_idx], self.X[te_idx]
-                X_tr, X_te = standardize_feat_mtx(X_tr, X_te, 'zscore')
+                tf_X_tr, tf_X_te = self.tf_X[tr_idx], self.tf_X[te_idx]
+
+                tf_X_tr, tf_X_te = standardize_feat_mtx(tf_X_tr, tf_X_te, 'zscore')
+                nontf_X, _ = standardize_feat_mtx(self.nontf_X, None, 'zscore')
+
+                X_tr = np.hstack([tf_X_tr, np.vstack([nontf_X for i in range(n_tfs_tr)])])
+                X_te = np.hstack([tf_X_te, np.vstack([nontf_X for i in range(n_tfs_te)])])
 
                 bg_idx = np.random.choice(
                     range(X_tr.shape[0]), BG_GENE_NUM, replace=False)
@@ -82,7 +105,7 @@ class TFPRExplainer:
                     calculate_tree_shap,
                     args=(
                         self.cv_results['models'][k], 
-                        X_te, te_genes, X_tr[bg_idx],))
+                        X_te, te_tg_pairs, X_tr[bg_idx],))
             
             self.shap_vals = [mp_results[k].get() for k in sorted(mp_results.keys())]
 
@@ -102,16 +125,17 @@ class TFPRExplainer:
             fmt='%s', delimiter=',')
 
         np.savetxt(
-            '{}/genes.csv.gz'.format(dirpath), self.genes,
+            '{}/tf_gene_pairs.csv.gz'.format(dirpath), np.array(self.tg_pairs),
             fmt='%s', delimiter=',')
     
         np.savetxt(
-            '{}/feat_mtx.csv.gz'.format(dirpath), self.X,
+            '{}/feat_mtx_tf.csv.gz'.format(dirpath), self.tf_X,
             fmt='%.8f', delimiter=',')
-    
-        # for k, model in enumerate(self.cv_results['models']):
-        #     pickle.dump(model, open('{}/cv{}.pkl'.format(dirpath, k), 'wb'))
+        np.savetxt(
+            '{}/feat_mtx_nontf.csv.gz'.format(dirpath), self.nontf_X,
+            fmt='%.8f', delimiter=',')
 
+        # TODO
         for k, df in enumerate(self.shap_vals):
             df['cv'] = k
             self.shap_vals[k] = df
@@ -120,53 +144,57 @@ class TFPRExplainer:
             index=False, compression='gzip')
 
 
-def train_and_predict(k, D_tr, D_te, is_regressor):
+def train_and_predict(k, D_tr, D_te, nontf_X, tfs, genes):
     """Train classifier and predict gene responses. 
     """
     logger.info('Cross validating fold {}'.format(k))
 
-    X_tr, y_tr = D_tr
-    X_te, y_te = D_te
-    n_te_samples, n_feats = X_te.shape
+    tf_X_tr, y_tr = D_tr
+    tf_X_te, y_te = D_te
+    tfs_tr, tfs_te = tfs
 
-    if is_regressor:
-        ## Train regressor and test
-        model = train_regressor(X_tr, y_tr)
+    X_tr = np.hstack([tf_X_tr, np.vstack([nontf_X for i in range(len(tfs_tr))])])
+    X_te = np.hstack([tf_X_te, np.vstack([nontf_X for i in range(len(tfs_te))])])
 
-        y_pred = model.predict(X_te)
-        r2 = r2_score(y_te, y_pred)
-        stats_df = pd.DataFrame({'cv': [k], 'r2': [r2]})
+    ## Train classifier and test
+    model = train_classifier(X_tr, y_tr)
 
-        logger.info('Cross-validation R2={:.3f} in fold {}'.format(r2, k))
+    y_pred = pd.DataFrame(
+        data=model.predict_proba(X_te), 
+        columns=model.classes_)[1].values
 
-    else:        
-        ## Train classifier and test
-        model = train_classifier(X_tr, y_tr)
+    ## Calculate AUC for each TF
+    stats_df = pd.DataFrame()
+    preds_df = pd.DataFrame()
+    n_genes = len(genes)
 
-        y_pred = pd.DataFrame(
-            data=model.predict_proba(X_te), 
-            columns=model.classes_)[1].values
-        auprc = average_precision_score(y_te, y_pred)
-        auroc = roc_auc_score(y_te, y_pred)
-        stats_df = pd.DataFrame({'cv': [k], 'auroc': [auroc], 'auprc': [auprc]})
-        
-        logger.info('Cross-validation AUPRC={:.3f} in fold {}'.format(auprc, k))
+    for i, tf in enumerate(tfs_te):
+        idx = list(range(i * n_genes, (i + 1) * n_genes))
+        auprc = average_precision_score(y_te[idx], y_pred[idx])
+        auroc = roc_auc_score(y_te[idx], y_pred[idx])
 
-    return {
-        'preds': pd.DataFrame({
-            'gene': y_te.index.values, 'cv': [k] * n_te_samples, 
-            'label': y_te.values, 'pred': y_pred}),
-        'stats': stats_df,
-        'models': model}
+        preds_df = preds_df.append(pd.DataFrame(
+            {'gene': genes, 'tf': [tf] * n_genes, 'label': y_te[idx], 'pred': y_pred[idx]}),
+            ignore_index=True)
+        stats_df = stats_df.append(pd.DataFrame(
+            {'cv': [k], 'tf': [tf], 'auroc': [auroc], 'auprc': [auprc]}),
+            ignore_index=True)
+    
+        logger.info('CV performance for TF {} in fold {}: AUPRC={:.3f}'.format(tf, k, auprc))
+
+    return {'preds': preds_df, 'stats': stats_df, 'models': model}
 
 
 def train_classifier(X, y):
     """Train a XGBoost classifier.
     """
     model = xgb.XGBClassifier(
-        n_estimators=500,
+        n_estimators=2500,
         learning_rate=.01,
         booster='gbtree',
+        gamma=5,
+        colsample_bytree=.8,
+        subsample=.8,
         n_jobs=-1,
         random_state=RAND_NUM
     )
@@ -178,7 +206,7 @@ def train_regressor(X, y):
     """Train a XGBoost regressor.
     """
     model = xgb.XGBRegressor(
-        n_estimators=500,
+        n_estimators=2500,
         learning_rate=.01,
         objective='reg:squarederror',
         booster='gbtree',
@@ -207,3 +235,10 @@ def calculate_tree_shap(model, X, genes, X_bg):
     shap_df = shap_df.reset_index()
     shap_df = pd.wide_to_long(shap_df, 'feat', 'gene', 'feat_idx').reset_index()
     return shap_df
+
+
+def expand_tf2gene_index(t, n):
+    g = []
+    for i in t:
+        g += list(range(i * n, (i + 1) * n))
+    return g
