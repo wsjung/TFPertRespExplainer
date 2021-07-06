@@ -97,6 +97,32 @@ def get_feature_indices(df, organism):
             'gene_expression:median_level': 'GEX level', 
             'gene_expression:variation': 'GEX var',
             'dna_sequence:nt_freq_agg': 'DNA sequence'}
+    elif organism == 'TGI':
+        feat_dict = {
+            'tf_binding:TF': 'TF binding',
+            'histone_modifications:H1_H3K27ac': 'H3K27ac',
+            'histone_modifications:H1_H3K27me3': 'H3K27me3',
+            'histone_modifications:H1_H3K36me3': 'H3K36me3',
+            'histone_modifications:H1_H3K4me1': 'H3K4me1',
+            'histone_modifications:H1_H3K4me3': 'H3K4me3',
+            'histone_modifications:H1_H3K9me3': 'H3K9me3',
+            'chromatin_accessibility:H1_ChromAcc': 'Chrom acc',
+            'gene_expression:median_level': 'GEX level', 
+            'gene_expression:variation': 'GEX var',
+            'dna_sequence:nt_freq_agg': 'DNA sequence'}
+    elif organism == 'TGI_RNASEQ':
+        feat_dict = {
+            'tf_binding:TF': 'TF binding',
+            'histone_modifications:ENCFF919FBG': 'H3K27ac',
+            'histone_modifications:ENCFF912ZUR': 'H3K27me3',
+            'histone_modifications:ENCFF422PZQ': 'H3K36me3',
+            'histone_modifications:ENCFF584AVI': 'H3K4me1',
+            'histone_modifications:ENCFF760NUN': 'H3K4me3',
+            'histone_modifications:ENCFF579PBG': 'H3K9me3',
+            'chromatin_accessibility:H1_ChromAcc_intersect': 'Chrom acc',
+            'gene_expression:median_level': 'GEX level', 
+            'gene_expression:variation': 'GEX var',
+            'dna_sequence:nt_freq_agg': 'DNA sequence'}
 
     idx_df = pd.DataFrame()
     for _, row in df.iterrows():
@@ -123,13 +149,14 @@ def calculate_resp_and_unresp_signed_shap_sum(data_dir, tfs, organism, sum_over_
     preds_df = pd.read_csv('{}/preds.csv.gz'.format(data_dir))
     preds_df = preds_df[preds_df['tf'].isin(tfs)]
 
+    print('getting feature indices...')
     feat_idx_df = get_feature_indices(feats_df, organism)
     
     ## Parse out shap+ and shap- values
     print('Parsing signed shap values ...')
     shap_df = shap_df.merge(preds_df[['tf:gene', 'label', 'gene']], how='left', on='tf:gene')
-    shap_df['shap+'] = shap_df['shap'].apply(lambda x: x if x > 0 else 0)
-    shap_df['shap-'] = shap_df['shap'].apply(lambda x: x if x < 0 else 0)
+    shap_df['shap+'] = shap_df['shap'].clip(lower=0)
+    shap_df['shap-'] = shap_df['shap'].clip(upper=0)
 
     ## Sum across reg region for each feature and each tf:gene, and then take 
     ## the mean among responsive targets and repeat for non-responsive targets.

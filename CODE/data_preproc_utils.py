@@ -5,9 +5,11 @@ import random
 import numpy as np
 import pandas as pd
 from pybedtools import BedTool
+import pybedtools
 from Bio import SeqIO
 import warnings
 import logging.config
+import sys # temporary check import
 
 warnings.filterwarnings("ignore")
 
@@ -15,6 +17,7 @@ warnings.filterwarnings("ignore")
 logging.config.fileConfig('logging.ini', disable_existing_loggers=False)
 logger = logging.getLogger(__name__)
 
+pybedtools.set_tempdir('/scratch/mblab/woojung/Human_TF_Resp/TFPertRespExplainer/TMP')
 
 def intersect_peak_regdna(peak_bed, regdna_bed, gene_df):
     """Intersect peaks and regulatory DNA to obtain signals within the 
@@ -165,7 +168,18 @@ def get_onehot_dna_sequence_slim(regdna_bed, genome_fa, tss_df):
         strand = seq_info['strand']
         start_pos = seq_info['start']
         end_pos = seq_info['end'] 
-        tss_pos = tss_df.loc[tss_df['name'] == s.id, 'start'].iloc[0]
+        #print(s)
+        #print(tss_df.head())
+        #print(seq_info)
+        name = s.id.split(':')[0]
+        chrom = s.id.split(':')[2]
+        #print(f"name: {name}")
+        tmp = seq_info['name']
+        #print(tmp)
+        tss_pos = tss_df.loc[tss_df['name'] == name, 'start'].iloc[0]
+        #print(tss_pos)
+        #print(tss_df.loc[tss_df['name']==name, 'start'])
+        #tss_pos = tss_df.loc[tss_df['name'] == name, 'start'].iloc[0]
         
         if strand == '+':
             rel_dists = np.arange(start_pos, end_pos, dtype=int) - tss_pos
@@ -182,7 +196,7 @@ def get_onehot_dna_sequence_slim(regdna_bed, genome_fa, tss_df):
         if len(rel_dists) != len(alphabet_idx):
             print(s.id)
 
-        gene_idx = genes.index(s.id)
+        gene_idx = genes.index(name)
         tmp_df = pd.DataFrame({
             'gene_idx': [gene_idx] * len(rel_dists),
             'rel_dist': rel_dists,
@@ -209,7 +223,7 @@ def get_nt_frequency(regdna_bed, genome_fa, genes):
     regdna_bed = regdna_bed.getfasta(fi=genome_fa, name=True)
 
     for s in load_fasta(regdna_bed.seqfn):
-        gene_idx = genes.index(s.id)
+        gene_idx = genes.index(s.id.split(':')[0])          # SPLIT  bc error
         seq_len = len(s.seq)
         seq = str(s.seq)
         
